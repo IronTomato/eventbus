@@ -1,9 +1,14 @@
 package irontomato.eventbus;
 
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
+
 import java.lang.reflect.ParameterizedType;
 import java.util.*;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Executor;
 import java.util.concurrent.Executors;
+import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
 public class EventBus {
@@ -11,6 +16,8 @@ public class EventBus {
     private Map<Class, Collection<EventListener>> registry = new HashMap<>();
 
     private Executor executor;
+
+    protected Logger logger = LogManager.getLogger(getClass());
 
     public EventBus() {
         executor = Executors.newCachedThreadPool();
@@ -34,7 +41,7 @@ public class EventBus {
                 });
     }
 
-    public void remove(EventListener<?> listener) {
+    public void unregister(EventListener<?> listener) {
         List<Class> emptyBuckets = new ArrayList<>();
         registry.entrySet().stream()
                 .forEach(entry -> {
@@ -48,15 +55,46 @@ public class EventBus {
         }
     }
 
-    public void onEvent(Event event) {
-        selectListeners(event).forEach(l -> l.onEvent(event));
-
+    public <T extends Event> void clear(Class<T> eventClass) {
+        registry.remove(eventClass);
     }
 
-    public void onEventAsync(Event event) {
+    public void onEvent(Event event) {
         selectListeners(event).forEach(
                 l -> executor.execute(
                         () -> l.onEvent(event)));
+    }
+
+    public void onEvent(Event event, Runnable notifier) {
+        List<EventListener> listeners = selectListeners(event).collect(Collectors.toList());
+        CountDownLatch latch = new CountDownLatch(listeners.size());
+        listeners.forEach(
+                l -> executor.execute(
+                        () -> {
+                            try {
+                                l.onEvent(event);
+                            } finally {
+                                latch.countDown();
+                            }
+                        }
+                )
+        );
+        executor.execute(() -> {
+            try {
+                latch.await();
+                notifier.run();
+            } catch (InterruptedException e) {
+                logger.error(e);
+            }
+        });
+    }
+
+    public void onEvent(EventChain chain) {
+        Event event = chain.pop();
+        if (event == null) {
+            return;
+        }
+        onEvent(event, () -> onEvent(chain));
     }
 
     private Stream<EventListener> selectListeners(Event event) {
